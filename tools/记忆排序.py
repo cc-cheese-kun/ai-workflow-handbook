@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""共用记忆排序：算每条记忆的当前分，生成 AI共用/记忆/MEMORY.md。
+"""Shared-memory ranking: score every memory line and generate AI共用/记忆/MEMORY.md,
+the one page every AI agent reads at the start of a session.
+
+Usage:
+  python3 记忆排序.py <vault root>          generate the file only, no git
+  python3 记忆排序.py <vault root> --git    pull first, then commit and push only MEMORY.md
+Each memory is one line in a topic file under AI共用/记忆/, inside a "## 记忆"
+section, tagged: (类型 type: 规矩 rule | 现状 fact ｜ 重要度 importance 0.1-1.0 ｜
+确认 last confirmed YYYY-MM-DD ｜ 写者 written by ｜ 来源 source).
+Score = importance x freshness. Rules never decay (freshness 1); facts halve
+every 30 days, because facts go stale and rules don't. A fact not confirmed for
+30 days is listed as "needs re-checking". The top 15 by score are "always loaded";
+the rest stay in their topic files. Full rules: AI共用/记忆规矩.md.
+
+共用记忆排序：算每条记忆的当前分，生成 AI共用/记忆/MEMORY.md。
 
 用法：
   python3 记忆排序.py <知识库根目录>            只生成文件，不碰 git
@@ -15,10 +29,13 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-常驻条数 = 15
-半衰天数 = 30
-复核天数 = 30
-TZ = timezone(timedelta(hours=8))
+常驻条数 = 15   # lines always loaded. 常驻条数
+半衰天数 = 30   # half-life of a fact, in days. 现状类的半衰期
+复核天数 = 30   # a fact older than this needs re-checking. 超过这么多天没确认就待复核
+TZ = timezone(timedelta(hours=8))   # UTC+8
+
+# One memory line: "- content（类型：…｜重要度：…｜确认：…｜写者：…｜来源：…）"
+# 一条记忆的格式。
 
 标签 = re.compile(
     r"^- (?P<内容>.+?)（类型：(?P<类型>规矩|现状)｜重要度：(?P<重要度>[01](?:\.\d+)?)"
@@ -27,6 +44,7 @@ TZ = timezone(timedelta(hours=8))
 
 
 def 读描述(文本):
+    """The `description:` from a file's front matter.  读 front matter 里的 description。"""
     m = re.match(r"^---\n(.*?)\n---\n", 文本, re.S)
     if not m:
         return ""
@@ -37,6 +55,10 @@ def 读描述(文本):
 
 
 def 扫描(目录, 今天):
+    """Parse every topic file. Returns (memories with scores, malformed lines,
+    old-format files without a "## 记忆" section, [(file, description)]).
+    Malformed lines are reported, never silently dropped or guessed.
+    扫描所有主题文件，算分；格式不对的列出来，不猜。"""
     记忆, 格式不对, 旧格式文件, 文件表 = [], [], [], []
     for 文件 in sorted(目录.glob("*.md")):
         if 文件.name == "MEMORY.md":
@@ -63,6 +85,7 @@ def 扫描(目录, 今天):
                 格式不对.append(f"{文件.name} 第 {行号} 行（重要度超出 0.1–1.0）")
                 continue
             天数 = (今天 - date.fromisoformat(d["确认"])).days
+            # Rules don't decay; facts halve every 半衰天数 days.  规矩不衰减；现状每半衰期减半。
             新鲜度 = 1.0 if d["类型"] == "规矩" else 0.5 ** (max(天数, 0) / 半衰天数)
             记忆.append({
                 **d, "重要度": 重要度, "天数": 天数, "分": 重要度 * 新鲜度,
@@ -73,6 +96,8 @@ def 扫描(目录, 今天):
 
 
 def 生成(目录, 今天):
+    """Build MEMORY.md: always-loaded top lines, needs-re-checking list, format
+    problems, and an index of all topic files.  生成 MEMORY.md 的全文。"""
     记忆, 格式不对, 旧格式文件, 文件表 = 扫描(目录, 今天)
     排序 = sorted(记忆, key=lambda x: (-x["分"], x["文件"]))
     出 = [
@@ -102,10 +127,13 @@ def 生成(目录, 今天):
 
 
 def 去掉时间(文本):
+    """Drop the "generated at" timestamp, so an unchanged page isn't rewritten
+    (and committed) every day.  去掉生成时间，内容没变就不重写、不提交。"""
     return re.sub(r"生成于 [^）]*）", "", 文本)
 
 
 def git(根, *参数):
+    """Run git in the vault, capturing output.  在知识库里跑 git。"""
     return subprocess.run(["git", "-C", str(根), *参数], capture_output=True, text=True)
 
 
@@ -119,6 +147,9 @@ def main():
     目标 = 目录 / "MEMORY.md"
     相对 = "AI共用/记忆/MEMORY.md"
 
+    # With --git, skip this run instead of fighting another writer: a git lock,
+    # local edits to MEMORY.md, or a pull that isn't a fast-forward.
+    # --git 时遇到 git 锁、MEMORY.md 有本地改动、pull 不能快进，都跳过这次，不硬来。
     if 用git:
         if (根 / ".git" / "index.lock").exists():
             print("有 git 锁，跳过这次"); return
